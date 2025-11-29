@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Literal, Dict
 from geopy.geocoders import Nominatim
+from geopy.location import Location
+from fastapi.middleware.cors import CORSMiddleware
 import requests
 
 app = FastAPI(
@@ -10,7 +12,20 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# ---- Constants ----
+# --------------------------------------
+# CORS
+# --------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # keep open during dev
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --------------------------------------
+# CONSTANTS
+# --------------------------------------
 PETROL_PRICE = 108.49
 PLATFORM_FEE_RATE = 0.075
 
@@ -21,15 +36,19 @@ MILEAGE_MAP: Dict[str, int] = {
     "200": 35,
 }
 
-OSRM_BASE_URL = "http://router.project-osrm.org/table/v1/driving"
+ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImViZTViOTkyNGYyMDRiOWRiNTg5OTVkMWQzNDgyYmE2IiwiaCI6Im11cm11cjY0In0="
 
-# Geocoder (ignore warning)
+# --------------------------------------
+# GEOCODER
+# --------------------------------------
 geolocator = Nominatim(
-    user_agent="pillionpal-fare-estimator",
-    timeout=10  # type: ignore[arg-type]
+    user_agent="pillionpal",
+    timeout=10  # type: ignore
 )
 
-# ---- Schemas ----
+# --------------------------------------
+# MODELS
+# --------------------------------------
 class LocationInput(BaseModel):
     start: str
     end: str
@@ -53,6 +72,16 @@ class FareBreakdown(BaseModel):
     pillion_share: float
 
 
+class AutoFareEstimate(BaseModel):
+    fare: float
+    duration_minutes: float
+
+
+class BusFareEstimate(BaseModel):
+    fare: float
+    duration_minutes: float
+
+
 class SingleFareResponse(BaseModel):
     start_coords: Coordinate
     end_coords: Coordinate
@@ -60,6 +89,8 @@ class SingleFareResponse(BaseModel):
     duration_minutes: float
     pricing_mode: Literal["single"]
     fare: FareBreakdown
+    auto_fare: AutoFareEstimate
+    bus_fare: BusFareEstimate
 
 
 class MultiFareResponse(BaseModel):
@@ -69,78 +100,114 @@ class MultiFareResponse(BaseModel):
     duration_minutes: float
     pricing_mode: Literal["multi"]
     fares: Dict[str, FareBreakdown]
+    auto_fare: AutoFareEstimate
+    bus_fare: BusFareEstimate
 
 
-# ---- Helpers ----
+# --------------------------------------
+# HELPERS
+# --------------------------------------
 def geocode_location(place: str) -> Coordinate:
-    location = geolocator.geocode(place, country_codes="IN")  # type: ignore[call-arg]
-    if not location:
+    loc_raw = geolocator.geocode(place, country_codes="IN")  # type: ignore
+    loc: Location | None = loc_raw if isinstance(loc_raw, Location) else None
+
+    if loc is None:
         raise HTTPException(
             status_code=400,
-            detail=f"Could not geocode location: '{place}'. Check spelling or try a more specific address."
+            detail=f"Could not geocode location: '{place}'."
         )
 
-    # type ignores = silence Pylance nonsense
-    return Coordinate(
-        lat=location.latitude,      # type: ignore[attr-defined]
-        lon=location.longitude      # type: ignore[attr-defined]
-    )
+    return Coordinate(lat=round(loc.latitude, 6), lon=round(loc.longitude, 6))
 
 
-def fetch_distance_and_duration(start: Coordinate, end: Coordinate) -> tuple[float, float]:
-    coords = f"{start.lon},{start.lat};{end.lon},{end.lat}"
-    url = f"{OSRM_BASE_URL}/{coords}?annotations=distance,duration"
+def fetch_distance_and_duration(start: Coordinate, end: Coordinate):
+    url = "https://api.openrouteservice.org/v2/directions/driving-car"
+
+    payload = {
+        "coordinates": [
+            [start.lon, start.lat],
+            [end.lon, end.lat]
+        ]
+    }
+
+    headers = {
+        "Authorization": ORS_API_KEY,
+        "Content-Type": "application/json"
+    }
 
     try:
-        response = requests.get(url, timeout=5)
-    except requests.RequestException:
+        res = requests.post(url, json=payload, headers=headers, timeout=10)
+        res.raise_for_status()
+    except:
         raise HTTPException(
             status_code=502,
-            detail="Could not reach OSRM routing service. Try again later."
+            detail="Could not reach ORS routing service."
         )
 
-    if not response.ok:
-        raise HTTPException(
-            status_code=502,
-            detail="Error fetching distance from routing service."
-        )
-
-    data = response.json()
+    data = res.json()
 
     try:
-        distance_m = data["distances"][0][1]
-        duration_s = data["durations"][0][1]
-    except (KeyError, IndexError, TypeError):
+        summary = data["routes"][0]["summary"]
+        distance_km = round(summary["distance"] / 1000, 2)
+        duration_min = round(summary["duration"] / 60, 1)
+    except:
         raise HTTPException(
             status_code=502,
-            detail="OSRM returned an unexpected response format."
+            detail="ORS returned unexpected routing structure."
         )
 
-    return distance_m / 1000.0, duration_s / 60.0
+    return distance_km, duration_min
 
 
-def calculate_fare(distance_km: float, mileage: float, engine_cc: str, duration_minutes: float) -> FareBreakdown:
+def calculate_fare(distance_km: float, mileage: float, engine_cc: str, duration_minutes: float):
     fuel_cost = (distance_km / mileage) * PETROL_PRICE
     platform_fee = fuel_cost * PLATFORM_FEE_RATE
     total_cost = fuel_cost + platform_fee
 
-    rider_share = total_cost * 0.40
-    pillion_share = total_cost * 0.60
-
     return FareBreakdown(
         engine_cc=engine_cc,
         mileage_kmpl=mileage,
-        distance_km=round(distance_km, 2),
-        duration_minutes=round(duration_minutes, 1),
-        fuel_cost=round(fuel_cost, 2),
-        platform_fee=round(platform_fee, 2),
-        total_cost=round(total_cost, 2),
-        rider_share=round(rider_share, 2),
-        pillion_share=round(pillion_share, 2),
+        distance_km=distance_km,
+        duration_minutes=duration_minutes,
+        fuel_cost=round(fuel_cost),
+        platform_fee=round(platform_fee),
+        total_cost=round(total_cost),
+        rider_share=round(total_cost * 0.40),
+        pillion_share=round(total_cost * 0.60),
     )
 
 
-# ---- Endpoint ----
+# ------------------------------
+# AUTO ESTIMATE (simple model)
+# ------------------------------
+def estimate_auto_fare(distance_km: float, duration_minutes: float) -> AutoFareEstimate:
+    base = 30
+    per_km = 12
+    fare = base + (distance_km * per_km)
+    return AutoFareEstimate(
+        fare=round(fare),
+        duration_minutes=round(duration_minutes * 1.2, 1)
+    )
+
+
+# ------------------------------
+# BUS ESTIMATE (simple model)
+# ------------------------------
+def estimate_bus_fare(distance_km: float, duration_minutes: float) -> BusFareEstimate:
+    if distance_km <= 5:
+        fare = 10
+    else:
+        fare = 10 + (distance_km - 5) * 2
+
+    return BusFareEstimate(
+        fare=max(10, round(fare)),
+        duration_minutes=round(duration_minutes * 1.8, 1)
+    )
+
+
+# --------------------------------------
+# ENDPOINT
+# --------------------------------------
 @app.post("/fare/estimate", response_model=SingleFareResponse | MultiFareResponse)
 async def estimate_fare(payload: LocationInput):
     start_coords = geocode_location(payload.start)
@@ -148,7 +215,10 @@ async def estimate_fare(payload: LocationInput):
 
     distance_km, duration_minutes = fetch_distance_and_duration(start_coords, end_coords)
 
-    # Multi-bike mode
+    auto = estimate_auto_fare(distance_km, duration_minutes)
+    bus = estimate_bus_fare(distance_km, duration_minutes)
+
+    # MULTI ENGINE
     if payload.bike_capacity == "all":
         fares = {
             cc: calculate_fare(distance_km, mileage, cc, duration_minutes)
@@ -158,21 +228,25 @@ async def estimate_fare(payload: LocationInput):
         return MultiFareResponse(
             start_coords=start_coords,
             end_coords=end_coords,
-            distance_km=round(distance_km, 2),
-            duration_minutes=round(duration_minutes, 1),
+            distance_km=distance_km,
+            duration_minutes=duration_minutes,
             pricing_mode="multi",
             fares=fares,
+            auto_fare=auto,
+            bus_fare=bus,
         )
 
-    # Single bike mode
+    # SINGLE ENGINE
     mileage = MILEAGE_MAP[payload.bike_capacity]
     fare = calculate_fare(distance_km, mileage, payload.bike_capacity, duration_minutes)
 
     return SingleFareResponse(
         start_coords=start_coords,
         end_coords=end_coords,
-        distance_km=round(distance_km, 2),
-        duration_minutes=round(duration_minutes, 1),
+        distance_km=distance_km,
+        duration_minutes=duration_minutes,
         pricing_mode="single",
         fare=fare,
+        auto_fare=auto,
+        bus_fare=bus,
     )

@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ----- PillionPal BRAND THEME ----- */
+
+@layer base {
+  :root {
+    /* Backgrounds */
+    --background: 69 23% 94%;         /* beige background */
+    --foreground: 0 0% 6%;            /* near-black text */
+
+    /* Cards */
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 6%;
+
+    /* Primary Brand Green */
+    --primary: 160 84% 36%;           /* #0EA370 */
+    --primary-foreground: 0 0% 100%;
+
+    /* Secondary Dark Green */
+    --secondary: 158 83% 27%;         /* #0A7F57 */
+    --secondary-foreground: 0 0% 100%;
+
+    /* Accents (light green elements in logo) */
+    --accent: 156 72% 39%;            /* #12B981 */
+    --accent-foreground: 0 0% 100%;
+
+    /* Muted */
+    --muted: 0 0% 92%;
+    --muted-foreground: 0 0% 40%;
+
+    /* Destructive */
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+
+    /* Border + Inputs */
+    --border: 0 0% 80%;
+    --input: 0 0% 80%;
+    --ring: 160 84% 36%;              /* brand green */
+    --radius: 0.5rem;
+  }
+
+  /* ----- DARK MODE ----- */
+  .dark {
+    --background: 0 0% 8%;
+    --foreground: 0 0% 98%;
+
+    --card: 0 0% 12%;
+    --card-foreground: 0 0% 98%;
+
+    --primary: 160 84% 45%;           /* brighter green for dark mode */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 158 83% 33%;
+    --secondary-foreground: 0 0% 100%;
+
+    --accent: 156 72% 46%;
+    --accent-foreground: 0 0% 100%;
+
+    --muted: 0 0% 20%;
+    --muted-foreground: 0 0% 70%;
+
+    --border: 0 0% 25%;
+    --input: 0 0% 25%;
+    --ring: 160 84% 45%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+  }
+}
